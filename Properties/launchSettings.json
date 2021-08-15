@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "QLearner": {
+      "commandName": "Executable",
+      "executablePath": "C:\\Users\\tiamat\\Code\\C#\\CatchTheCheese\\bin\\Debug\\net5.0\\CatchTheCheese.exe",
+      "nativeDebugging": true
+    }
+  }
+}
