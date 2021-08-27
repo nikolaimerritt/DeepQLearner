@@ -9,184 +9,271 @@ using MathNet.Numerics.LinearAlgebra;
 namespace DeepLearning
 {
     using Vector = Vector<double>;
-    public class QLearner<T>
+    using TrainingPair = Tuple<Vector<double>, Vector<double>>;
+    public class QLearner<TEnvironment, TMove>
+        where TEnvironment : IEnvironment<TMove>
     {
+        private static readonly Random _rng = new();
+
         private readonly NeuralNet _net;
-        private readonly Random _rng = new();
-        private readonly double _learningRate = 0.5;
-        private readonly double _futureDiscount = 0.9;
-        private readonly IState<T> _initialState;
-        private static readonly int _maxMemorySize = 500;
-        private readonly List<(IState<T>, T, IState<T>)> _memory = new(_maxMemorySize);
+        private readonly TEnvironment _environment; 
+        private static readonly int _maxMemorySize = 6000;
+        private static readonly double _learningRate = 0.1;
 
-        public QLearner(IState<T> initialState)
+        public QLearner(TEnvironment environment, NeuralNet net)
         {
-            _initialState = initialState;
+            _environment = environment;
+            _net = net;
+        }
 
-            int[] layerSizes = LayerSizes(_initialState.InputLayerSize, _initialState.AllPossibleActions.Count, layerCount: 4);
-
+        private static NeuralNet DefaultNet(TEnvironment environment)
+        {
+            int moveCount = environment.AllPossibleMoves.Count;
             var layers = new NeuralLayerConfig[]
             {
-                new InputLayer(layerSizes[0]),
-                new HiddenLayer(layerSizes[1], new ReluActivation()),
-                new HiddenLayer(layerSizes[2], new ReluActivation()),
-                new OutputLayer(layerSizes[3], new IdentityActivation())
+                new InputLayer(environment.LayerSize),
+                new HiddenLayer(environment.LayerSize / 2, new ReluActivation(leak: 0.01)),
+                new HiddenLayer(environment.LayerSize / 2, new ReluActivation(leak: 0.01)),
+                new OutputLayer(layerSize: moveCount, new IdentityActivation())
             };
 
-            var descender = new StochasticGradientDescender(learningRate: 0.001);
+            var descender = new AdamGradientDescender(learningRate: 1e-4);
             var cost = new MSECost();
-            _net = NeuralNetFactory.RandomCustomisedForRelu(layers, descender, cost);
+            return NeuralNetFactory.RandomCustomisedForRelu(layers, descender, cost);
         }
 
-        private static int[] LayerSizes(int inputLayerSize, int outputLayerSize, int layerCount)
-        {
-            double start = inputLayerSize;
-            double step = 1.0 / (layerCount - 1.0);
-            double end = outputLayerSize;
+        public QLearner(TEnvironment environment)
+            : this(environment, DefaultNet(environment))
+        { }
 
-            return Enumerable
-                .Range(0, layerCount)
-                .Select(i => (int)(start + i * step * (end - start)))
-                .ToArray();
+        private TMove ChooseExploreExploitMove(TEnvironment environment, double exploreProbability)
+        {
+            // augmentation
+            TMove hint = environment.Hint(out bool gaveHint);
+            if (gaveHint)
+                return hint;
+            else if (_rng.NextDouble() < exploreProbability)
+                return ChooseRandomMove(environment);
+            else 
+                return ChooseBestMove(environment);
         }
 
-        private T ChooseBestAction(IState<T> state)
+        public TMove MakeMove(TEnvironment environment)
         {
-            Vector qvalues = _net.Output(state.ToInputLayer());
-            for (int i = 0; i < qvalues.Count; i++)
+            TMove hint = environment.Hint(out bool gaveHint);
+            return gaveHint ? hint : ChooseBestMove(environment);
+        }
+
+        private TMove ChooseBestMove(TEnvironment environment)
+        {
+            List<TMove> validMoves = environment.AllPossibleMoves.Where(environment.IsValidMove).ToList();
+            TMove bestMove = default;
+            double highestQValue = double.NegativeInfinity;
+            foreach (TMove move in validMoves)
             {
-                T action = state.AllPossibleActions[i];
-                if (!state.IsValidAction(action))
-                    qvalues[i] = double.NegativeInfinity;
-            }
-            var bestIndices = Enumerable.Range(0, qvalues.Count)
-                .Where(i => qvalues[i] == qvalues.Max())
-                .ToList();
-
-            return state.AllPossibleActions[bestIndices[_rng.Next(bestIndices.Count)]];
-        }
-
-        private T ChooseRandomAction(IState<T> state)
-        {
-            var validActions = state.AllPossibleActions
-                .Where(state.IsValidAction)
-                .ToList();
-            return validActions[_rng.Next(validActions.Count)];
-        }
-
-        private double QValue(IState<T> state, T action)
-        {
-            if (!state.IsValidAction(action))
-                return double.NegativeInfinity;
-
-            Vector qvalues = _net.Output(state.ToInputLayer());
-            return qvalues[ActionIndex(state, action)];
-        }
-
-        private double NewQValue(IState<T> before, T action, IState<T> after)
-        {
-            double oldQValue = QValue(before, action);
-            double rewardAfter = after.Reward();
-            double futureQValue = after.IsTerminalState()
-                ? rewardAfter
-                : after.AllPossibleActions
-                .Where(after.IsValidAction)
-                .Select(a => QValue(after, a))
-                .Max();
-
-            return (1 - _learningRate) * oldQValue + _learningRate * (rewardAfter + _futureDiscount * futureQValue);
-        }
-
-        private void LearnFromMemory()
-        {
-            List<(Vector, Vector)> trainingPairs = new(_memory.Count);
-            foreach ((var before, var action, var after) in _memory)
-            {
-                Vector input = before.ToInputLayer();
-                Vector desiredOutput = _net.Output(input);
-                desiredOutput[ActionIndex(before, action)] = NewQValue(before, action, after);
-                trainingPairs.Add((input, desiredOutput));
-            }
-            Shuffle(trainingPairs);
-            _net.GradientDescent(trainingPairs, batchSize: 256, numEpochs: 20);
-        }
-
-        private static int ActionIndex(IState<T> state, T action)
-            => state.AllPossibleActions.FindIndex(act => act.Equals(action));
-
-        private double ExploreProbability(int gameNum, int numGames, double maxProb, double minProb)
-            => minProb + gameNum * (maxProb - minProb) / numGames;
-
-        private void LearnFromGame(double exploreProbability, ref int deaths, ref int cheeses)
-        {
-            IState<T> state = _initialState;
-            while (!state.IsTerminalState())
-            {
-                IState<T> before = state;
-                T action = _rng.Next() <= exploreProbability ? ChooseRandomAction(before) : ChooseBestAction(before);
-                IState<T> after = before.AfterAction(action);
-                _memory.Add((before, action, after));
-
-                if (_memory.Count == _maxMemorySize)
+                double qvalue = QValue(environment.ToLayer(), move);
+                if (qvalue > highestQValue)
                 {
-                    LearnFromMemory();
-                    _memory.Clear();
-                }
-                state = after;
-                if (state.IsTerminalState())
-                {
-                    if (state.Reward() >= 10)
-                        cheeses++;
-                    else if (state.Reward() <= -10)
-                        deaths++;
+                    highestQValue = qvalue;
+                    bestMove = move;
                 }
             }
+
+            return bestMove;
         }
 
-        public void Learn(int numGames)
+        private static TMove ChooseRandomMove(TEnvironment environment)
         {
-            int deaths = 0;
-            int cheeses = 0;
-            int updateFrequency = 100;
+            var validMoves = environment.AllPossibleMoves.Where(environment.IsValidMove).ToList();
+            return validMoves[_rng.Next(validMoves.Count)];
+        }
 
-            for (int gameNum = 1; gameNum <= numGames; gameNum++)
+        private Vector<double> QValues(Vector<double> environmentLayer)
+            => _net.Output(environmentLayer);
+
+        private double QValue(Vector<double> environmentLayer, TMove move)
+        {
+            var qvalues = QValues(environmentLayer);
+            double qvalue = qvalues[IndexOf(move)];
+            return qvalue;
+        }
+
+        private double NewQValue(Moment<TMove> moment, double discountFactor)
+        {
+            double oldQValue = QValue(moment.Before, moment.Move);
+            double temporalDifference = moment.IsTerminal ?
+                moment.Reward - oldQValue :
+                moment.Reward + discountFactor * QValues(moment.After).Max() - oldQValue;
+
+            return oldQValue + _learningRate * temporalDifference;
+        }
+
+        private void LearnFromMemory(List<Moment<TMove>> memory, double futureDiscount)
+        {
+            if (!memory.Any())
+                throw new ArgumentException($"Could not learn from an empty memory list");
+
+            Shuffle(memory);
+            List<TrainingPair> trainingPairs = new(capacity: memory.Count);
+            foreach (var moment in memory)
             {
-                LearnFromGame(ExploreProbability(gameNum, numGames, maxProb: 0.9, minProb: 0.01), ref deaths, ref cheeses);
+                Vector input = moment.Before;
+                Vector desiredOutput = QValues(input);
+                desiredOutput[IndexOf(moment.Move)] = NewQValue(moment, futureDiscount);
+                trainingPairs.Add(new(input, desiredOutput));
+            }
+            _net.GradientDescent(trainingPairs, batchSize: 256, numEpochs: 10, computeBatchGradientInParallel: true);
+        }
 
-                if (gameNum % updateFrequency == 0)
+        public void Learn(int totalGames, string directoryPath)
+        {
+            int printFrequency = totalGames / 100;
+            double exploreProbability;
+            double futureDiscount;
+            List<Moment<TMove>> memory = new(capacity: _maxMemorySize);
+
+            for (int gameNum = 1; gameNum <= totalGames; gameNum++)
+            {
+                exploreProbability = ExploreProbability(gameNum, totalGames);
+                futureDiscount = gameNum < (int)5e4 ? // future q values will be complete garbage at first, and likely outside [-1, 1]
+                    0 :
+                    1 - exploreProbability;
+
+                if (gameNum % printFrequency == 0)
                 {
-                    Console.WriteLine($"game num: {gameNum} / {numGames} \t deaths: {deaths}, cheeses: {cheeses}");
-                    deaths = 0;
-                    cheeses = 0;
+                    Console.WriteLine($"Game {gameNum} / {totalGames} \t exploring {100 * exploreProbability:0.00}% \t future q-values decay rate: {futureDiscount:0.000}");
+                    if (gameNum % (10 * printFrequency) == 0 || gameNum == totalGames)
+                    {
+                        Console.Write($"\nSaving QLearner to directory {directoryPath}...\t");
+                        WriteToDirectory(directoryPath);
+                        Console.WriteLine("saved");
+                    }
                 }
+
+                while (!_environment.IsTerminal())
+                {
+                    Vector before = _environment.ToLayer();
+                    TMove move = ChooseExploreExploitMove(_environment, exploreProbability);
+                    _environment.MakeMove(move);
+
+                    Moment<TMove> moment = new(
+                        before, 
+                        move, 
+                        _environment.ToLayer(),
+                        _environment.Reward(), 
+                        _environment.IsTerminal(), 
+                        _environment.AllPossibleMoves.Where(_environment.IsValidMove));
+                    memory.Add(moment);
+
+                    if (memory.Count >= _maxMemorySize)
+                    {
+                        LearnFromMemory(memory, futureDiscount);
+                        memory.Clear();
+                    }
+                }
+                _environment.Reset();
             }
         }
 
-        public void PlayDemoGame()
+        private int IndexOf(TMove move)
+            => _environment.AllPossibleMoves.IndexOf(move);
+
+        public void WriteToDirectory(string directoryPath)
+            => _net.WriteToDirectory(directoryPath);
+
+        public static QLearner<TEnvironment, TMove> ReadFromDirectory(TEnvironment environment, string directoryPath)
+            => new QLearner<TEnvironment, TMove>(environment, NeuralNet.ReadFromDirectory(directoryPath));
+
+        private void ShowState(int gameNum, int totalGames, double exploreProb)
         {
-            IState<T> state = _initialState;
-            Console.WriteLine(state);
-            while (!state.IsTerminalState())
+            Console.Clear();
+            Console.WriteLine($"Game {gameNum} / {totalGames} \t\t explore prob: {100 * exploreProb:0.00}%\n");
+            Console.WriteLine(_environment);
+            Console.WriteLine("\n\n");
+
+            foreach (TMove move in _environment.AllPossibleMoves.Where(_environment.IsValidMove))
+              Console.Write($"{move}: {QValue(_environment.ToLayer(), move):0.000000} \t");
+            Console.ReadKey();
+            Console.WriteLine();
+        }
+
+        private TMove ReadActionInput()
+        {
+            var validMoves = _environment.AllPossibleMoves.Where(_environment.IsValidMove).ToList();
+
+            for (int i = 0; i < validMoves.Count; i++)
+                Console.Write($"{i}: {validMoves[i]} \t");
+
+            int indexInputted = int.Parse(Console.ReadLine());
+            return validMoves[indexInputted];
+        }
+
+        public void ShowQValues()
+        {
+            foreach (TMove mv in _environment.AllPossibleMoves.Where(_environment.IsValidMove))
+                Console.Write($"{_environment.MoveToString(mv)}: {QValue(_environment.ToLayer(), mv):0.0000} \t");
+            Console.WriteLine("\n\n");
+        }
+
+        public void ShowDemo()
+        {
+            Console.WriteLine(_environment);
+            ShowQValues();
+            
+            while (!_environment.IsTerminal())
             {
-                T action = ChooseBestAction(state);
-                Thread.Sleep(1000);
+                TMove move = ReadActionInput();
                 Console.Clear();
-                state = state.AfterAction(action);
-                Console.WriteLine(state);
+                _environment.MakeMove(move);
+                Console.WriteLine(_environment);
+
+                ShowQValues();
             }
         }
 
-        private void Shuffle<U>(IList<U> list)
+
+        private static double ExploreProbability(int gameNum, int totalGames)
         {
-            int swapIdx = list.Count;
-            while (swapIdx > 1)
+            double gameProportion = (double)gameNum / totalGames;
+            double maxProb = 0.2;
+            double minProb = 0.01;
+            double halfLife = 0.3;
+
+            double decay = Math.Log(2 / (1 + minProb / maxProb)) / halfLife;
+            return Math.Max(minProb, maxProb * Math.Exp(-decay * gameProportion));
+        }
+
+        private static List<Vector<double>> GetInputVectors(TEnvironment environment, int numVectors)
+        {
+            List<Vector<double>> inputVectors = new(numVectors);
+            for (int i = 1; i <= numVectors; i++)
             {
-                swapIdx--;
-                int replaceIdx = _rng.Next(swapIdx + 1);
-                U value = list[replaceIdx];
-                list[replaceIdx] = list[swapIdx];
-                list[swapIdx] = value;
+                if (!environment.IsTerminal())
+                {
+                    TMove move = ChooseRandomMove(environment);
+                    inputVectors.Add(environment.ToLayer());
+                    environment.MakeMove(move);
+                }
+                else environment.Reset();
+            }
+            environment.Reset();
+            return inputVectors;
+        }
+
+
+        public static void Shuffle<T>(IList<T> list)
+        {
+            int n = list.Count;
+            while (n > 1)
+            {
+                n--;
+                int k = _rng.Next(n + 1);
+                T value = list[k];
+                list[k] = list[n];
+                list[n] = value;
             }
         }
     }
+
+    
 }

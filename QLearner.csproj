@@ -12,13 +12,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Keras.NET" Version="3.8.5" />
     <PackageReference Include="MathNet.Numerics" Version="4.15.0" />
     <PackageReference Include="MathNet.Numerics.Data.Text" Version="4.1.0" />
+    <PackageReference Include="Microsoft.ML" Version="1.6.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Reference Include="NeuralNet">
-      <HintPath>..\..\NeuralNet\bin\Debug\net5.0\NeuralNet.dll</HintPath>
+      <HintPath>..\..\NeuralNet\bin\Release\net5.0\NeuralNet.dll</HintPath>
     </Reference>
   </ItemGroup>
 

@@ -2,7 +2,7 @@
   "profiles": {
     "QLearner": {
       "commandName": "Executable",
-      "executablePath": "C:\\Users\\tiamat\\Code\\C#\\CatchTheCheese\\bin\\Debug\\net5.0\\CatchTheCheese.exe",
+      "executablePath": "C:\\Users\\tiamat\\Code\\C#\\ConnectFour\\bin\\Debug\\net5.0\\ConnectFour.exe",
       "nativeDebugging": true
     }
   }
